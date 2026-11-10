@@ -1,0 +1,6 @@
+{
+  "name": "agent-status",
+  "version": "0.1.0",
+  "description": "サブエージェント（担当）ごとの状態・使った道具・経過時間をペインに表示する",
+  "types": "./types/index.d.ts"
+}

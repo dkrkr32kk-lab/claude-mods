@@ -1,0 +1,16 @@
+{
+  "name": "claude-mods",
+  "owner": { "name": "dkrkr32kk-lab" },
+  "plugins": [
+    {
+      "name": "usage-meter",
+      "source": "./usage-meter",
+      "description": "5時間・週の使用量の残り％と回復時刻を、入力欄の下に色の四角で常に表示する"
+    },
+    {
+      "name": "agent-status",
+      "source": "./agent-status",
+      "description": "担当（サブエージェント）ごとの状態・触っている場所・経過時間をパネルに表示する"
+    }
+  ]
+}
