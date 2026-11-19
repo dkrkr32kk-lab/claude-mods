@@ -1,0 +1,6 @@
+{
+  "name": "auto-model",
+  "version": "0.1.0",
+  "description": "依頼の重さ（軽い・普通・重い）でモデルとエフォートを自動で切り替え、会話が長い時は切替えずに注意を出す",
+  "types": "./types/index.d.ts"
+}

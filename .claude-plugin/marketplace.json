@@ -11,6 +11,11 @@
       "name": "agent-status",
       "source": "./agent-status",
       "description": "担当（サブエージェント）ごとの状態・触っている場所・経過時間をパネルに表示する"
+    },
+    {
+      "name": "auto-model",
+      "source": "./auto-model",
+      "description": "依頼の重さ（軽い・普通・重い）でモデルとエフォートを自動で切り替え、会話が長い時は切替えずに注意を出す"
     }
   ]
 }

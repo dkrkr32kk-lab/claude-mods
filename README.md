@@ -1,6 +1,6 @@
 # claude-mods
 
-Claude Code 用のMOD（フックで画面を足すプラグイン）を2つまとめたリポジトリです。
+Claude Code 用のMOD（フックで画面を足すプラグイン）を3つまとめたリポジトリです。
 
 ## usage-meter（使用量メーター）
 
@@ -24,19 +24,41 @@ Claude Code 用のMOD（フックで画面を足すプラグイン）を2つま�
 
 `/agent-status` でいつでもパネルを開けます。キャラの絵は公式の画像ではなく、似せて描いたものです。
 
+## auto-model（モデル・エフォートの自動切替）
+
+依頼ごとに重さ（軽い・普通・重い）を判定して、Claude に送るモデルとエフォートを切り替えます。入力欄の上に1行で状態を出します。
+
+```
+自動切替：重い（キーワード）→ opus・high
+```
+
+| 重さ | モデル・エフォート | 例 |
+|---|---|---|
+| 軽い | Sonnet・medium | 開いて・一覧・どこ（60文字以内の短い依頼） |
+| 普通 | Sonnet・high | 文章の作成・説明など |
+| 重い | Opus・high | VBA・マクロ・設計・改修・原因調査など |
+
+- まずキーワードで判定し、決まらない時だけ Haiku に判定させます。Haiku が答えられない時は「重い」にします
+- 「はい」「お願いします」だけの返事は、前の依頼と同じ重さにします
+- 会話が5万トークンを超えたら、モデルは切替えずエフォートだけ変えて通知を出します（切替えると会話の読み直しで大量に消費するため）。10万トークンを超えたら【要注意】を赤字で出します
+- 担当（サブエージェント）のモデルは変えません
+- 行の「止める」ボタンか `/auto-model` で、止める・再開を切り替えます
+- 画面のモデル選択欄の表示は変わりません。実際のモデルは入力欄の上の1行で確かめます
+
 ## インストール
 
 ### デスクトップアプリ（Code タブ）
 
 1. 入力欄の横の「＋」→「Plugins」を開く
 2. 「Add marketplace」に `dkrkr32kk-lab/claude-mods` を入れる
-3. 「Add plugin」から `usage-meter` と `agent-status` を追加する
+3. 「Add plugin」から `usage-meter`・`agent-status`・`auto-model` を追加する
 
 ### ターミナル版の Claude Code
 
 ```
 /plugin install usage-meter --marketplace dkrkr32kk-lab/claude-mods
 /plugin install agent-status --marketplace dkrkr32kk-lab/claude-mods
+/plugin install auto-model --marketplace dkrkr32kk-lab/claude-mods
 ```
 
 「Add marketplace?」と聞かれたら `y`、範囲は一番上（user）のまま Enter。
@@ -46,6 +68,7 @@ Claude Code 用のMOD（フックで画面を足すプラグイン）を2つま�
 ```
 claude plugin install usage-meter --marketplace dkrkr32kk-lab/claude-mods
 claude plugin install agent-status --marketplace dkrkr32kk-lab/claude-mods
+claude plugin install auto-model --marketplace dkrkr32kk-lab/claude-mods
 ```
 
 入れたあと、新しいセッションから表示されます。
