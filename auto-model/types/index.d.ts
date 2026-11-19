@@ -25,6 +25,10 @@ declare module 'claude-code' {
       offReason: string
       // 直前の返事で実際に使ったモデルとエフォート（例：claude-opus-5-5・medium）
       lastUsed: string
+      // 会話の長さの基準＝最初の返事の文脈の大きさ（まだ無い時は 0）。増えた分はこれとの差
+      base: number
+      // このセッションで最初の依頼が来たら true
+      turned: boolean
     }
   }
 }

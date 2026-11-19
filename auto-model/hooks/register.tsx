@@ -10,7 +10,9 @@ const PLAN: Record<Level, { model: 'sonnet' | 'opus'; effort: Decision['effort']
   重い: { model: 'opus', effort: 'high' },
 }
 
-// ■ 会話の長さの目安（トークン）。これ以上はモデルを切替えない
+// ■ 会話の長さの目安（トークン）。「会話で増えた分」で数える
+// 最初の返事の時点で CLAUDE.md・道具の一覧などで約8万あるため、全体の量では数えない
+// 増えた分が WARN_TOKENS 以上なら、モデルを切替えない（エフォートだけ変える）
 export const WARN_TOKENS = 50_000
 export const STRONG_TOKENS = 100_000
 
@@ -52,15 +54,28 @@ export const family = (model: string | undefined) => {
   return undefined
 }
 
-// 判定と、会話の長さから、実際に使うモデルとエフォートを決める
+// 会話で増えた分。基準（最初の返事の文脈の大きさ）がまだ無い時は 0
+export const grownTokens = (total: number, base: number) => (base > 0 ? Math.max(0, total - base) : 0)
+
+// 基準の更新。まだ無ければ今の量を基準にし、/clear や圧縮で今の量が基準より減ったら今の量に下げる
+export const nextBase = (total: number, base: number) => {
+  if (total <= 0) return base
+  if (base <= 0 || total < base) return total
+
+  return base
+}
+
+// 判定と、会話で増えた分から、実際に使うモデルとエフォートを決める
+// 最初の依頼は、キャッシュに読み直す会話がまだ無いので据え置かない
 export const decide = (
   level: Level,
   how: string,
-  tokens: number,
+  grown: number,
   current: string | undefined,
+  isFirst = false,
 ): Decision => {
   const plan = PLAN[level]
-  const isHeld = tokens >= WARN_TOKENS && current !== undefined && current !== plan.model
+  const isHeld = !isFirst && grown >= WARN_TOKENS && current !== undefined && current !== plan.model
 
   return {
     level,
@@ -104,6 +119,8 @@ const isOff = atom({ plugin: 'auto-model', key: 'isOff' } as const, false)
 const tokens = atom({ plugin: 'auto-model', key: 'tokens' } as const, 0)
 const offReason = atom({ plugin: 'auto-model', key: 'offReason' } as const, '')
 const lastUsed = atom({ plugin: 'auto-model', key: 'lastUsed' } as const, '')
+const base = atom({ plugin: 'auto-model', key: 'base' } as const, 0)
+const turned = atom({ plugin: 'auto-model', key: 'turned' } as const, false)
 
 // 止める／再開を切り替える。止めた時は true
 const toggle = async ($: EngineInterface) => {
@@ -116,6 +133,15 @@ const toggle = async ($: EngineInterface) => {
 
 const man = (n: number) => `${(n / 10_000).toFixed(1)}万`
 
+// 今の文脈の量を記録し、基準も更新する。会話で増えた分を返す
+const measure = async ($: EngineInterface, total: number) => {
+  await update($, tokens, () => total)
+  const b = nextBase(total, await read($, base))
+  await update($, base, () => b)
+
+  return grownTokens(total, b)
+}
+
 export const register: Register = on => {
   // この回の判定（turnId ごと）と、直前に送ったモデルの系統
   const byTurn = new Map<string, Decision>()
@@ -123,8 +149,6 @@ export const register: Register = on => {
   const used = new Map<string, { model: string; effort: unknown }>()
   let current: string | undefined
   let lastLevel: Level = '重い'
-  // 最初の依頼の前のモデル設定（アプリの起動時の設定など）は手動の切替とみなさない
-  let hasTurned = false
 
   on('session.start', async ($, e, next) => {
     const started = await next(e)
@@ -133,8 +157,8 @@ export const register: Register = on => {
       description: 'モデル・エフォートの自動切替を止める／再開する',
     })
     current = family(await $.session.model())
-    const t = (await $.session.usage()).context.tokens ?? 0
-    await update($, tokens, () => t)
+    // 文脈の量は返事が来るまで入らない（再開した会話では最初から入っている）
+    await measure($, (await $.session.usage()).context.tokens ?? 0)
 
     return started
   })
@@ -145,14 +169,13 @@ export const register: Register = on => {
     return { text: off ? '自動切替を止めた（モデルは画面で選んだものに戻る）' : '自動切替を再開した' }
   })
 
-  // 会話の長さ（文脈の使用量）を覚えておく
+  // 会話の長さ（文脈の使用量）を覚えておく。最初に入った量が基準になる
   on('session.measure', async ($, e, next) => {
     if (e.changed.includes('context')) {
-      const t = e.context.tokens ?? 0
-      const before = await read($, tokens)
-      await update($, tokens, () => t)
-      if (before < STRONG_TOKENS && t >= STRONG_TOKENS) {
-        $.ui.toast(`【要注意】会話が${man(t)}トークンになった。モデルを替えるなら新しいセッションで`)
+      const before = grownTokens(await read($, tokens), await read($, base))
+      const grown = await measure($, e.context.tokens ?? 0)
+      if (before < STRONG_TOKENS && grown >= STRONG_TOKENS) {
+        $.ui.toast(`【要注意】会話で${man(grown)}トークン増えた。モデルを替えるなら新しいセッションで`)
       }
     }
 
@@ -162,7 +185,10 @@ export const register: Register = on => {
   // 依頼が来たら重さを判定する（メインの会話だけ。担当＝サブエージェントは触らない）
   on('turn.start', async ($, e, next) => {
     if (e.agentId !== undefined) return next(e)
-    hasTurned = true
+    const isFirst = !(await read($, turned))
+    await update($, turned, () => true)
+    // 最初の依頼の時点で、画面で選ばれているモデルを読み直す（開始時はアプリが設定する前のことがある）
+    if (isFirst) current = family(await $.session.model()) ?? current
     if (await read($, isOff)) return next(e)
 
     let level: Level
@@ -183,13 +209,14 @@ export const register: Register = on => {
     }
     lastLevel = level
 
-    const t = (await $.session.usage()).context.tokens ?? (await read($, tokens))
-    const d = decide(level, how, t, current)
+    const total = (await $.session.usage()).context.tokens ?? (await read($, tokens))
+    const grown = await measure($, total)
+    const d = decide(level, how, grown, current, isFirst)
     byTurn.set(e.turnId, d)
     await update($, last, () => d)
     if (d.isHeld) {
       $.ui.toast(
-        `会話が長い（${man(t)}）ので ${d.model} のまま続ける。判定は「${level}」で本来は ${d.wanted}。替えるなら新しいセッションで`,
+        `会話で${man(grown)}トークン増えたので ${d.model} のまま続ける。判定は「${level}」で本来は ${d.wanted}。替えるなら新しいセッションで`,
       )
     }
 
@@ -225,9 +252,15 @@ export const register: Register = on => {
   })
 
   // 画面で手動でモデルを選んだら、自動切替を止める（選んだモデルをそのまま使う）
+  // 最初の依頼の前の切替（アプリの起動時の設定など）は止めないが、今のモデルには取り込む
   on('classic.PostModelSwitch', async ($, e, next) => {
+    if (!(await read($, turned))) {
+      current = family(e.to_model) ?? current
+
+      return next(e)
+    }
     const isManual = e.source === 'command' || e.source === 'picker' || e.source === 'sdk'
-    if (hasTurned && isManual && e.from_model !== e.to_model && !(await read($, isOff))) {
+    if (isManual && e.from_model !== e.to_model && !(await read($, isOff))) {
       await update($, isOff, () => true)
       await update($, offReason, () => '手動でモデルを選んだため')
       current = family(e.to_model) ?? current
@@ -245,17 +278,19 @@ export const register: Register = on => {
     const reason = await read($, offReason)
     const d = await read($, last)
     const t = await read($, tokens)
+    const g = grownTokens(t, await read($, base))
 
     const head = off
       ? `自動切替：停止中${reason !== '' ? `（${reason}）` : ''}`
       : d === null
         ? '自動切替：次の依頼で判定'
         : `自動切替：${d.level}（${d.how}）→ ${d.model}・${d.effort}${d.isHeld ? `（本来は${d.wanted}。会話が長いので据え置き）` : ''}`
+    const size = `会話で${man(g)}増えた（全体${man(t)}）`
     const warn =
-      t >= STRONG_TOKENS
-        ? `【要注意】会話${man(t)}トークン。切替えるなら新しいセッションで`
-        : t >= WARN_TOKENS
-          ? `注意：会話${man(t)}トークン。モデルは切替えない`
+      g >= STRONG_TOKENS
+        ? `【要注意】${size}。切替えるなら新しいセッションで`
+        : g >= WARN_TOKENS
+          ? `注意：${size}。モデルは切替えない`
           : ''
 
     const usedText = await read($, lastUsed)
@@ -264,7 +299,7 @@ export const register: Register = on => {
       <Box flexDirection="column">
         <Text dimColor>{head}</Text>
         {usedText !== '' && <Text>直前の返事：{usedText}</Text>}
-        {warn !== '' && <Text color={t >= STRONG_TOKENS ? 'red' : 'yellow'}>{warn}</Text>}
+        {warn !== '' && <Text color={g >= STRONG_TOKENS ? 'red' : 'yellow'}>{warn}</Text>}
         <Box>
           <Button
             key="toggle"
