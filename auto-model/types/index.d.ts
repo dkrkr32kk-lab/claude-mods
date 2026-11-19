@@ -21,6 +21,10 @@ declare module 'claude-code' {
       last: Shaped<Decision | null>
       isOff: boolean
       tokens: number
+      // 止めている理由（再開中は空）
+      offReason: string
+      // 直前の返事で実際に使ったモデルとエフォート（例：claude-opus-5-5・medium）
+      lastUsed: string
     }
   }
 }

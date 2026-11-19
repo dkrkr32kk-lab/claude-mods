@@ -102,14 +102,29 @@ const byHaiku = async ($: EngineInterface, text: string): Promise<Level | undefi
 const last = atom({ plugin: 'auto-model', key: 'last' } as const, null, { shape: 'last-1' })
 const isOff = atom({ plugin: 'auto-model', key: 'isOff' } as const, false)
 const tokens = atom({ plugin: 'auto-model', key: 'tokens' } as const, 0)
+const offReason = atom({ plugin: 'auto-model', key: 'offReason' } as const, '')
+const lastUsed = atom({ plugin: 'auto-model', key: 'lastUsed' } as const, '')
+
+// 止める／再開を切り替える。止めた時は true
+const toggle = async ($: EngineInterface) => {
+  const off = !(await read($, isOff))
+  await update($, isOff, () => off)
+  await update($, offReason, () => (off ? '止めるを押したため' : ''))
+
+  return off
+}
 
 const man = (n: number) => `${(n / 10_000).toFixed(1)}万`
 
 export const register: Register = on => {
   // この回の判定（turnId ごと）と、直前に送ったモデルの系統
   const byTurn = new Map<string, Decision>()
+  // ターンごとに、実際に返事をしたモデルと送ったエフォート
+  const used = new Map<string, { model: string; effort: unknown }>()
   let current: string | undefined
   let lastLevel: Level = '重い'
+  // 最初の依頼の前のモデル設定（アプリの起動時の設定など）は手動の切替とみなさない
+  let hasTurned = false
 
   on('session.start', async ($, e, next) => {
     const started = await next(e)
@@ -125,8 +140,7 @@ export const register: Register = on => {
   })
 
   on('command.run', { command: 'auto-model' }, async $ => {
-    const off = !(await read($, isOff))
-    await update($, isOff, () => off)
+    const off = await toggle($)
 
     return { text: off ? '自動切替を止めた（モデルは画面で選んだものに戻る）' : '自動切替を再開した' }
   })
@@ -147,7 +161,9 @@ export const register: Register = on => {
 
   // 依頼が来たら重さを判定する（メインの会話だけ。担当＝サブエージェントは触らない）
   on('turn.start', async ($, e, next) => {
-    if (e.agentId !== undefined || (await read($, isOff))) return next(e)
+    if (e.agentId !== undefined) return next(e)
+    hasTurned = true
+    if (await read($, isOff)) return next(e)
 
     let level: Level
     let how: string
@@ -180,17 +196,43 @@ export const register: Register = on => {
     return next(e)
   })
 
-  // Claude へ送る直前に、モデルとエフォートを書き換える
+  // Claude へ送る直前に、モデルとエフォートを書き換える。実際に返事をしたモデルも記録する
   on('turn.step', async function* ($, e, next) {
-    const d = e.agentId === undefined ? byTurn.get(e.turnId) : undefined
-    if (d === undefined) return yield* next(e)
-    current = d.model
+    if (e.agentId !== undefined) return yield* next(e)
+    const d = byTurn.get(e.turnId)
+    const sent = d === undefined ? e : { ...e, model: d.model, effort: d.effort }
+    const r = yield* next(sent)
+    const answered = r.usage?.model ?? sent.model
+    current = family(answered) ?? current
+    used.set(e.turnId, { model: answered, effort: sent.effort })
 
-    return yield* next({ ...e, model: d.model, effort: d.effort })
+    return r
   })
 
-  on('turn.complete', ($, e, next) => {
-    if (e.agentId === undefined) byTurn.delete(e.turnId)
+  // このターンで実際に返事をしたモデルを、入力欄の上の1行に出すため覚えておく
+  on('turn.complete', async ($, e, next) => {
+    const r = await next(e)
+    if (e.agentId !== undefined) return r
+    const u = used.get(e.turnId)
+    byTurn.delete(e.turnId)
+    used.delete(e.turnId)
+    if (u !== undefined) {
+      const effort = typeof u.effort === 'string' ? `・${u.effort}` : ''
+      await update($, lastUsed, () => `${u.model}${effort}`)
+    }
+
+    return r
+  })
+
+  // 画面で手動でモデルを選んだら、自動切替を止める（選んだモデルをそのまま使う）
+  on('classic.PostModelSwitch', async ($, e, next) => {
+    const isManual = e.source === 'command' || e.source === 'picker' || e.source === 'sdk'
+    if (hasTurned && isManual && e.from_model !== e.to_model && !(await read($, isOff))) {
+      await update($, isOff, () => true)
+      await update($, offReason, () => '手動でモデルを選んだため')
+      current = family(e.to_model) ?? current
+      $.ui.toast(`手動で ${e.to_model} を選んだので自動切替を止めた。再開は「再開」ボタンか /auto-model`)
+    }
 
     return next(e)
   })
@@ -200,11 +242,12 @@ export const register: Register = on => {
     if (e.props.hasSurvey) return next(e)
     const { Box, Button, Text } = $.ui.resolve(e)
     const off = await read($, isOff)
+    const reason = await read($, offReason)
     const d = await read($, last)
     const t = await read($, tokens)
 
     const head = off
-      ? '自動切替：停止中'
+      ? `自動切替：停止中${reason !== '' ? `（${reason}）` : ''}`
       : d === null
         ? '自動切替：次の依頼で判定'
         : `自動切替：${d.level}（${d.how}）→ ${d.model}・${d.effort}${d.isHeld ? `（本来は${d.wanted}。会話が長いので据え置き）` : ''}`
@@ -215,15 +258,20 @@ export const register: Register = on => {
           ? `注意：会話${man(t)}トークン。モデルは切替えない`
           : ''
 
+    const usedText = await read($, lastUsed)
+
     return (
-      <Box>
-        <Text dimColor>{head} </Text>
-        {warn !== '' && <Text color={t >= STRONG_TOKENS ? 'red' : 'yellow'}>{warn} </Text>}
-        <Button
-          key="toggle"
-          label={off ? '再開' : '止める'}
-          onPress={() => update($, isOff, v => !v)}
-        />
+      <Box flexDirection="column">
+        <Text dimColor>{head}</Text>
+        {usedText !== '' && <Text>直前の返事：{usedText}</Text>}
+        {warn !== '' && <Text color={t >= STRONG_TOKENS ? 'red' : 'yellow'}>{warn}</Text>}
+        <Box>
+          <Button
+            key="toggle"
+            label={off ? '再開' : '止める'}
+            onPress={() => toggle($)}
+          />
+        </Box>
       </Box>
     )
   })
